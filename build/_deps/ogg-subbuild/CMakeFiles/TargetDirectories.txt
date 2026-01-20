@@ -1,0 +1,3 @@
+C:/Users/Mateus Mota/Documents/Estudo/Projetos/FlappyBird/build/_deps/ogg-subbuild/CMakeFiles/ogg-populate.dir
+C:/Users/Mateus Mota/Documents/Estudo/Projetos/FlappyBird/build/_deps/ogg-subbuild/CMakeFiles/edit_cache.dir
+C:/Users/Mateus Mota/Documents/Estudo/Projetos/FlappyBird/build/_deps/ogg-subbuild/CMakeFiles/rebuild_cache.dir

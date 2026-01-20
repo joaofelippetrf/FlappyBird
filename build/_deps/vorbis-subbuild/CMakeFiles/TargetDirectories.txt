@@ -1,0 +1,3 @@
+C:/Users/Mateus Mota/Documents/Estudo/Projetos/FlappyBird/build/_deps/vorbis-subbuild/CMakeFiles/vorbis-populate.dir
+C:/Users/Mateus Mota/Documents/Estudo/Projetos/FlappyBird/build/_deps/vorbis-subbuild/CMakeFiles/edit_cache.dir
+C:/Users/Mateus Mota/Documents/Estudo/Projetos/FlappyBird/build/_deps/vorbis-subbuild/CMakeFiles/rebuild_cache.dir
