@@ -4,7 +4,7 @@
 #include <cmath>
 
 Body::Body(Vector2 pos, Vector2 vel) 
-    : position(pos), velocity(vel), radius(30)
+    : position(pos), velocity(vel), radius(30), alive(true)
 {
     acceleration = {0, 1200};
     shape.setRadius(radius);

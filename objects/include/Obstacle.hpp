@@ -8,7 +8,7 @@ struct Obstacle {
     float width;
     float height;
     sf::RectangleShape shape;
-    
+    bool passed = false;
     Obstacle(Vector2 pos,  float height);
     
     void update(double dt);

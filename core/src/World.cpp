@@ -1,35 +1,37 @@
-#include <vector>
-#include <SFML/Graphics.hpp>
 #include "../../objects/include/Body.hpp"
 #include "../../objects/include/Obstacle.hpp"
 #include "../include/World.hpp"
-#include <iostream>
+#include <vector>
+#include <random>
 
 
-World::World() 
-    : birde({200, 540}, {0,0}), game(true), score(0)
-{ 
+
+World::World(int initialBirds) : birdsAlive(initialBirds)
+{   
 }
 
-void World :: handleInput(const sf::Event& event, Body& bird){        
-        if (const auto* keyPressed = event.getIf<sf::Event::KeyPressed>()) {        
-            if (keyPressed->code == sf::Keyboard::Key::Up ) {
-                bird.jump(); 
-            }
-        }
-        if (event.is<sf::Event::MouseButtonPressed>()) {
-            bird.jump();
-        }
+Vector2 World :: getInputs(){   
+    float x, y;     
+    if (obstacles[0].passed) {
+        x = obstacles[2].position.x;
+        y = obstacles[2].position.y + obstacles[2].height / 2;
+    }
+    else{
+        x = obstacles[0].position.x;
+        y = obstacles[0].position.y + obstacles[0].height / 2;
+    }
+    return {x ,y};
 }
 
-void World :: handleCollision(Body& bird){        
-    if(obstacles.empty()) return;
+void World :: handleCollision(Body& bird){    
+    if(obstacles.empty() || !bird.alive) return;
+
     float halfWidth = obstacles[0].width/2.0;
     float bX = bird.position.x;
     float bY = bird.position.y;
     float rad = bird.radius;
 
-    if(bY >= 1080 || bY <= -200) {game = false; return;}
+    if(bY >= 1080 || bY <= -100) {bird.alive = false; birdsAlive-- ; hitBounderings++;return;}
         
     float objX = obstacles[0].position.x ;
 
@@ -40,9 +42,10 @@ void World :: handleCollision(Body& bird){
     float bottom = obstacles[1].position.y - obstacles[1].height /2.0;
 
     if(abs(bX - objX) <= halfWidth){
-        if(bY - rad < top || bY + rad >bottom ) game = false;
+        if(bY - rad < top || bY + rad >bottom ){ bird.alive = false; birdsAlive--; return;}
         if(abs(bY - top) >= rad && abs(bY - bottom) >= rad ) return;
-        game = false;
+        bird.alive = false;
+        birdsAlive--;
         return;
     }
 
@@ -54,17 +57,42 @@ void World :: handleCollision(Body& bird){
     double rdSq = (double)rad * rad;
 
     if(distance1 > rdSq && distance2 > rdSq) return;
-    game = false;
+    bird.alive = false;
+    birdsAlive--;
     return;
 }
 
-void World :: update(double dt, Body& bird){
+void World :: updateBird(double dt, Body& bird){
+    if(!bird.alive) return;
+    bird.time += dt;
+    bird.update(dt);
+    if(bird.score > maximumScore) maximumScore = bird.score;
+
+}
+
+bool World :: updateScoreEval(float leftmostOfBird){
+        if (obstacles[0].passed == false && leftmostOfBird > obstacles[0].position.x + obstacles[0].width / 2.0){
+            obstacles[0].passed = true;
+            return true;    
+        }
+        return false;
+}
+
+void World :: updateObstacle(double dt){
     float timer =1.4;
+    
     if(spawn >= timer || obstacles.empty()){
         float screenHeight = 1080.f;
         float empty = 250.f; 
 
-        int rdm = (rand() % 580) + 200;
+        int rdm ;
+        if (maximumScore < 40) { 
+            std::mt19937 deterministicGen(42 + obstacleIndex); 
+            std::uniform_int_distribution<int> dist(200, 780);
+            rdm = dist(deterministicGen);
+            obstacleIndex++; 
+        }
+        else rdm = (rand() % 580) + 200;
 
 
         float heightUp = rdm - (empty / 2.f); 
@@ -88,8 +116,8 @@ void World :: update(double dt, Body& bird){
 
         obstacles = nw;
         obstacles.emplace_back(up);
-        spawn = 0;
         obstacles.emplace_back(down);
+        spawn = 0;
     }
 
     else{
@@ -97,16 +125,23 @@ void World :: update(double dt, Body& bird){
             obs.update(dt);
         }
     }
-    
-    bool hasPassed = bird.position.x - bird.radius > obstacles[0].position.x + obstacles[0].width/2.0;
-    bird.update(dt);
-    if(!hasPassed && bird.position.x - bird.radius > obstacles[0].position.x + obstacles[0].width/2.0) score++; 
     spawn+=dt;
 }
 
-void World :: draw(sf::RenderWindow& window, Body& bird){
+void World :: drawBird(sf::RenderWindow& window, Body& bird){
+    window.draw(bird.shape);
+}
+
+void World :: draw(sf::RenderWindow& window){
     for(auto& obstacle : obstacles){
         window.draw(obstacle.shape);
     }
-    window.draw(bird.shape);
+}
+
+void World :: reset(int initialBirds){
+    birdsAlive = initialBirds;
+    hitBounderings = 0;
+    obstacles.clear();
+    obstacleIndex = 0;
+    maximumScore = 0;
 }
