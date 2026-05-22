@@ -1,0 +1,212 @@
+#include <SFML/Graphics.hpp>
+#include <optional>
+#include <vector>
+#include "core/include/World.hpp"
+#include "population/include/Agent.hpp"
+#include "population/include/Population.hpp"
+#include "core/include/Random.hpp"
+#include <ctime>
+#include <cstdlib>
+#include <algorithm>
+#include <execution>
+#include <iostream>
+#include <string>
+#include <fstream>
+#include <chrono>
+#include <iomanip>
+#include "population/include/Brain.hpp"
+
+enum class Mode { Train, Play };
+
+// Persistência simples do cérebro (texto, números em ordem fixa)
+static bool saveBrain(const Brain& b, const std::string& path) {
+    std::ofstream f(path);
+    if (!f) return false;
+    f << std::setprecision(17);
+    f << b.numInput << " " << b.numHidden << "\n";
+    for (double x : b.weights_hidden) f << x << "\n";
+    for (double x : b.biases_hidden)  f << x << "\n";
+    for (double x : b.weights_output) f << x << "\n";
+    f << b.biases_output << "\n";
+    return (bool)f;
+}
+
+static bool loadBrain(Brain& out, const std::string& path) {
+    std::ifstream f(path);
+    if (!f) return false;
+    int ni, nh; f >> ni >> nh;
+    if (!f || ni <= 0 || nh <= 0) return false;
+    std::vector<double> w_h(ni * nh), b_h(nh), w_o(nh);
+    double b_o = 0.0;
+    for (auto& x : w_h) f >> x;
+    for (auto& x : b_h) f >> x;
+    for (auto& x : w_o) f >> x;
+    f >> b_o;
+    if (!f) return false;
+    out = Brain(w_h, b_h, w_o, b_o);
+    out.numInput  = ni;
+    out.numHidden = nh;
+    return true;
+}
+
+int main(int argc, char** argv)
+{
+    Mode mode = Mode::Train;
+    std::string model_path = "best_brain.txt";
+    if (argc > 1) {
+        std::string m = argv[1];
+        if (m == "play")       mode = Mode::Play;
+        else if (m == "train") mode = Mode::Train;
+        else {
+            std::cerr << "Uso: " << argv[0] << " [train|play] [model_path]\n"
+                      << "  train (default): roda evolução com 1000 pássaros, salva o melhor em " << model_path << "\n"
+                      << "  play:            carrega 1 pássaro do modelo salvo\n";
+            return -1;
+        }
+    }
+    if (argc > 2) model_path = argv[2];
+    std::cout << "[INFO] modo=" << (mode == Mode::Train ? "TRAIN" : "PLAY")
+              << " model=" << model_path << "\n";
+
+    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+    sf::Font font;
+    if (!font.openFromFile("FontAwesome6_Regular.ttf"))
+    {
+        return -1;
+    }
+
+    sf::Text uiText(font);
+    uiText.setCharacterSize(25);
+    uiText.setFillColor(sf::Color::White);
+    uiText.setOutlineColor(sf::Color::Black);
+    uiText.setOutlineThickness(2.f);
+    uiText.setPosition({20.f, 20.f});
+
+    sf::RenderWindow window(sf::VideoMode({1920u, 1080u}), "Flappy bird");
+    window.setFramerateLimit(60);
+    double dt = 0.016;
+    int initialBirds = (mode == Mode::Play) ? 1 : 1000;
+
+    Population generation(initialBirds);
+    World physics(initialBirds);
+
+    int elite = std::min(5,  initialBirds);
+    int parents = std::min(10, initialBirds);
+    int tournamentSize = std::min(10, initialBirds);
+    int idx ;
+
+    if (mode == Mode::Play) {
+        Brain b;
+        if (!loadBrain(b, model_path)) {
+            std::cerr << "[ERRO] Nao foi possivel carregar modelo de '" << model_path
+                      << "'. Rode antes em modo train.\n";
+            return -1;
+        }
+        generation.agents[0].brain = b;
+        std::cout << "[INFO] Modelo carregado.\n";
+    }
+
+    float birdX = generation.agents[0].bird.position.x;
+    float birdRadius = generation.agents[0].bird.radius;
+
+    // Ground-truth para validação contra vision.cpp.
+    // Coordenadas normalizadas em [0,1] usando o canvas lógico 1920x1080.
+    std::ofstream truth("/tmp/flappy_truth.jsonl", std::ios::out | std::ios::trunc);
+    const float GAME_W = 1920.f, GAME_H = 1080.f;
+    auto wall_seconds = []() {
+        auto d = std::chrono::system_clock::now().time_since_epoch();
+        return std::chrono::duration<double>(d).count();
+    };
+
+    while (window.isOpen())
+    {
+        while (const std::optional event = window.pollEvent())
+        {
+            if (event->is<sf::Event::Closed>())
+            {
+                window.close();
+            }
+        }
+        window.clear(sf::Color::Black);
+        physics.updateObstacle(dt);
+        physics.draw(window);
+
+        bool updateScore = physics.updateScoreEval(birdX - birdRadius);
+        if(updateScore){
+            generation.updateScore();
+        }
+
+        for (int i = 0; i < initialBirds; i++)
+        {
+            Vector2 nextObstacle = physics.getInputs();
+            
+            physics.updateBird(dt, generation.agents[i].bird);
+            physics.handleCollision(generation.agents[i].bird);
+            generation.agents[i].act(nextObstacle.x, nextObstacle.y, dt);
+            if(generation.agents[i].bird.alive)  physics.drawBird(window, generation.agents[i].bird);
+        }
+
+        std::string stats = "Generation " + std::to_string(generation.gen) +
+                            "\nAlive " + std::to_string(physics.birdsAlive) +
+                            "\nScore " + std::to_string(physics.maximumScore);
+        uiText.setString(stats);
+        window.draw(uiText);
+
+        window.display();
+
+        if (truth && physics.obstacles.size() >= 2 && !generation.agents.empty()) {
+            const Body& b = generation.agents[0].bird;
+            int top_i = (physics.obstacles[0].passed && physics.obstacles.size() >= 4) ? 2 : 0;
+            const Obstacle& tp = physics.obstacles[top_i];
+            const Obstacle& bp = physics.obstacles[top_i + 1];
+            float pipe_x     = (tp.position.x - tp.width * 0.5f) / GAME_W;
+            float gap_top    = (tp.position.y + tp.height * 0.5f) / GAME_H;
+            float gap_bottom = (bp.position.y - bp.height * 0.5f) / GAME_H;
+            truth << std::fixed << std::setprecision(6)
+                  << "{\"t\":"          << wall_seconds()
+                  << ",\"bird_x\":"     << (b.position.x / GAME_W)
+                  << ",\"bird_y\":"     << (b.position.y / GAME_H)
+                  << ",\"bird_r\":"     << (b.radius     / GAME_H)
+                  << ",\"pipe_x\":"     << pipe_x
+                  << ",\"gap_top\":"    << gap_top
+                  << ",\"gap_bottom\":" << gap_bottom
+                  << ",\"alive\":"      << (b.alive ? 1 : 0)
+                  << "}\n";
+            truth.flush();
+        }
+
+        if (physics.birdsAlive == 0)
+        {
+            if (mode == Mode::Play) {
+                // No modo play não evoluímos: só recomeçamos com o mesmo cérebro.
+                std::cout << "[PLAY] Score final: " << physics.maximumScore
+                          << " — reiniciando.\n";
+                generation.restartBirds();
+                physics.reset(initialBirds);
+                continue;
+            }
+
+            idx = elite;
+            generation.sort();
+            std::cout << "maximumScore at Generation " << generation.gen
+                      << ": " << physics.maximumScore << "\n";
+
+            // Salva o melhor cérebro depois do sort (agents[0] = melhor)
+            if (!generation.agents.empty()) {
+                if (saveBrain(generation.agents[0].brain, model_path)) {
+                    std::cout << "[TRAIN] Modelo salvo em " << model_path << "\n";
+                } else {
+                    std::cerr << "[TRAIN] Falha ao salvar modelo em " << model_path << "\n";
+                }
+            }
+
+            generation.getEliteChildren(idx, parents);
+            generation.getDiverseChildren(idx, tournamentSize);
+            generation.restartBirds();
+
+            generation.gen++;
+            physics.reset(initialBirds);
+        }
+    }
+    return 0;
+}
