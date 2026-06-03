@@ -16,7 +16,45 @@
 #include <iomanip>
 #include "population/include/Brain.hpp"
 
-enum class Mode { Train, Play };
+// Rede UDP (POSIX — funciona em Linux, Raspberry Pi e macOS)
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+enum class Mode { Train, Play, Serve };
+
+// Abre um socket UDP não-bloqueante escutando em 0.0.0.0:port.
+// Retorna o fd, ou -1 em caso de erro.
+static int openJumpSocket(unsigned short port) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    return fd;
+}
+
+// Drena todos os datagramas pendentes. Retorna true se chegou pelo menos um
+// comando de pulo (qualquer datagrama não-vazio conta como "pula").
+static bool pollJump(int fd) {
+    bool jump = false;
+    char buf[64];
+    while (true) {
+        ssize_t n = recvfrom(fd, buf, sizeof(buf), 0, nullptr, nullptr);
+        if (n <= 0) break;   // EWOULDBLOCK => sem mais pacotes
+        jump = true;
+    }
+    return jump;
+}
 
 // Persistência simples do cérebro (texto, números em ordem fixa)
 static bool saveBrain(const Brain& b, const std::string& path) {
@@ -53,20 +91,31 @@ int main(int argc, char** argv)
 {
     Mode mode = Mode::Train;
     std::string model_path = "best_brain.txt";
+    unsigned short serve_port = 5005;
     if (argc > 1) {
         std::string m = argv[1];
         if (m == "play")       mode = Mode::Play;
         else if (m == "train") mode = Mode::Train;
+        else if (m == "serve") mode = Mode::Serve;
         else {
-            std::cerr << "Uso: " << argv[0] << " [train|play] [model_path]\n"
+            std::cerr << "Uso: " << argv[0] << " [train|play|serve] [model_path|porta]\n"
                       << "  train (default): roda evolução com 1000 pássaros, salva o melhor em " << model_path << "\n"
-                      << "  play:            carrega 1 pássaro do modelo salvo\n";
+                      << "  play:            carrega 1 pássaro do modelo salvo\n"
+                      << "  serve [porta]:   1 pássaro controlado por UDP (cérebro roda em outra máquina, ex.: Raspberry Pi)\n";
             return -1;
         }
     }
-    if (argc > 2) model_path = argv[2];
-    std::cout << "[INFO] modo=" << (mode == Mode::Train ? "TRAIN" : "PLAY")
-              << " model=" << model_path << "\n";
+    if (mode == Mode::Serve) {
+        if (argc > 2) serve_port = static_cast<unsigned short>(std::atoi(argv[2]));
+    } else if (argc > 2) {
+        model_path = argv[2];
+    }
+    const char* mode_name = (mode == Mode::Train) ? "TRAIN"
+                          : (mode == Mode::Play)  ? "PLAY" : "SERVE";
+    std::cout << "[INFO] modo=" << mode_name;
+    if (mode == Mode::Serve) std::cout << " porta_udp=" << serve_port;
+    else                     std::cout << " model=" << model_path;
+    std::cout << "\n";
 
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
     sf::Font font;
@@ -85,7 +134,18 @@ int main(int argc, char** argv)
     sf::RenderWindow window(sf::VideoMode({1920u, 1080u}), "Flappy bird");
     window.setFramerateLimit(60);
     double dt = 0.016;
-    int initialBirds = (mode == Mode::Play) ? 1 : 1000;
+    int initialBirds = (mode == Mode::Train) ? 1000 : 1;
+
+    // Modo serve: abre o socket UDP que recebe os pulos da máquina do cérebro.
+    int jump_fd = -1;
+    if (mode == Mode::Serve) {
+        jump_fd = openJumpSocket(serve_port);
+        if (jump_fd < 0) {
+            std::cerr << "[ERRO] Nao foi possivel abrir socket UDP na porta " << serve_port << "\n";
+            return -1;
+        }
+        std::cout << "[SERVE] Escutando pulos em UDP 0.0.0.0:" << serve_port << "\n";
+    }
 
     Population generation(initialBirds);
     World physics(initialBirds);
@@ -136,13 +196,24 @@ int main(int argc, char** argv)
             generation.updateScore();
         }
 
+        // No modo serve, o pulo vem por UDP (cérebro roda em outra máquina).
+        // Drenamos o socket uma vez por frame, antes de atualizar o pássaro.
+        bool remoteJump = false;
+        if (mode == Mode::Serve) remoteJump = pollJump(jump_fd);
+
         for (int i = 0; i < initialBirds; i++)
         {
             Vector2 nextObstacle = physics.getInputs();
-            
+
             physics.updateBird(dt, generation.agents[i].bird);
             physics.handleCollision(generation.agents[i].bird);
-            generation.agents[i].act(nextObstacle.x, nextObstacle.y, dt);
+            if (mode == Mode::Serve) {
+                // Sem cérebro local: aplica o pulo recebido pela rede.
+                if (remoteJump && generation.agents[i].bird.alive)
+                    generation.agents[i].bird.jump();
+            } else {
+                generation.agents[i].act(nextObstacle.x, nextObstacle.y, dt);
+            }
             if(generation.agents[i].bird.alive)  physics.drawBird(window, generation.agents[i].bird);
         }
 
@@ -177,9 +248,9 @@ int main(int argc, char** argv)
 
         if (physics.birdsAlive == 0)
         {
-            if (mode == Mode::Play) {
-                // No modo play não evoluímos: só recomeçamos com o mesmo cérebro.
-                std::cout << "[PLAY] Score final: " << physics.maximumScore
+            if (mode == Mode::Play || mode == Mode::Serve) {
+                // Play/Serve não evoluem: só recomeçam (o cérebro é externo no serve).
+                std::cout << "[" << mode_name << "] Score final: " << physics.maximumScore
                           << " — reiniciando.\n";
                 generation.restartBirds();
                 physics.reset(initialBirds);
@@ -208,5 +279,6 @@ int main(int argc, char** argv)
             physics.reset(initialBirds);
         }
     }
+    if (jump_fd >= 0) close(jump_fd);
     return 0;
 }
