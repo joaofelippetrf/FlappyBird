@@ -6,7 +6,7 @@
 Obstacle::Obstacle(Vector2 pos, float height) 
 : width(80), height(height)
 {
-    velocity = {-600,0};
+    velocity = {-350,0};   // mais lento (era -600) — jogo mais fácil
     this->position = pos;
 
     shape.setSize({width, height});

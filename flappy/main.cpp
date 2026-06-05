@@ -23,6 +23,10 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+// Domain randomization (sim-to-real): declarados em Agent.hpp, usados em Agent::act.
+double g_noise_std   = 0.0;
+int    g_delay_frames = 0;
+
 enum class Mode { Train, Play, Serve };
 
 // Abre um socket UDP não-bloqueante escutando em 0.0.0.0:port.
@@ -117,6 +121,14 @@ int main(int argc, char** argv)
     else                     std::cout << " model=" << model_path;
     std::cout << "\n";
 
+    // Domain randomization (sim-to-real): treine com TRAIN_NOISE/TRAIN_DELAY
+    // pra o cérebro aguentar o ruído e a latência da câmera.
+    if (const char* e = std::getenv("TRAIN_NOISE")) g_noise_std    = std::atof(e);
+    if (const char* e = std::getenv("TRAIN_DELAY")) g_delay_frames = std::atoi(e);
+    if (g_noise_std > 0.0 || g_delay_frames > 0)
+        std::cout << "[RANDOMIZE] noise_std=" << g_noise_std
+                  << " delay_frames=" << g_delay_frames << "\n";
+
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
     sf::Font font;
     if (!font.openFromFile("FontAwesome6_Regular.ttf"))
@@ -163,7 +175,24 @@ int main(int argc, char** argv)
             return -1;
         }
         generation.agents[0].brain = b;
-        std::cout << "[INFO] Modelo carregado.\n";
+        std::cout << "[INFO] Modelo carregado. w0=" << b.weights_hidden[0]
+                  << " (ni=" << b.numInput << " nh=" << b.numHidden << ")\n";
+    }
+
+    // CONTINUE=1: treina a partir do best salvo (em vez de começar do zero).
+    // Semeia vários agentes com o cérebro carregado pra ele sobreviver à seleção
+    // e evoluir; o resto continua aleatório (mantém diversidade).
+    if (mode == Mode::Train && std::getenv("CONTINUE")) {
+        Brain b;
+        if (loadBrain(b, model_path)) {
+            int seed = std::min(20, initialBirds);
+            for (int i = 0; i < seed; i++) generation.agents[i].brain = b;
+            std::cout << "[TRAIN] Continuando de " << model_path
+                      << " (" << seed << " sementes).\n";
+        } else {
+            std::cout << "[TRAIN] CONTINUE pedido mas '" << model_path
+                      << "' nao existe — comecando do zero.\n";
+        }
     }
 
     float birdX = generation.agents[0].bird.position.x;
@@ -178,6 +207,8 @@ int main(int argc, char** argv)
         return std::chrono::duration<double>(d).count();
     };
 
+    bool forceEndGen = false;   // 'K' encerra a geração atual na hora
+
     while (window.isOpen())
     {
         while (const std::optional event = window.pollEvent())
@@ -185,6 +216,13 @@ int main(int argc, char** argv)
             if (event->is<sf::Event::Closed>())
             {
                 window.close();
+            }
+            else if (const auto* key = event->getIf<sf::Event::KeyPressed>())
+            {
+                // K: mata a geração atual (salva o melhor e evolui já).
+                // Esc: fecha (em train salva o melhor da geração atual antes).
+                if (key->code == sf::Keyboard::Key::K)      forceEndGen = true;
+                else if (key->code == sf::Keyboard::Key::Escape) window.close();
             }
         }
         window.clear(sf::Color::Black);
@@ -217,12 +255,9 @@ int main(int argc, char** argv)
             if(generation.agents[i].bird.alive)  physics.drawBird(window, generation.agents[i].bird);
         }
 
-        std::string stats = "Generation " + std::to_string(generation.gen) +
-                            "\nAlive " + std::to_string(physics.birdsAlive) +
-                            "\nScore " + std::to_string(physics.maximumScore);
-        uiText.setString(stats);
-        window.draw(uiText);
-
+        // HUD (Generation/Alive/Score) desativado: o texto branco no canto
+        // virava contorno e atrapalhava a detecção da câmera. O score continua
+        // saindo no terminal a cada fim de geração.
         window.display();
 
         if (truth && physics.obstacles.size() >= 2 && !generation.agents.empty()) {
@@ -246,8 +281,12 @@ int main(int argc, char** argv)
             truth.flush();
         }
 
-        if (physics.birdsAlive == 0)
+        if (physics.birdsAlive == 0 || forceEndGen)
         {
+            if (forceEndGen) {
+                std::cout << "[" << mode_name << "] Geracao encerrada manualmente (K).\n";
+                forceEndGen = false;
+            }
             if (mode == Mode::Play || mode == Mode::Serve) {
                 // Play/Serve não evoluem: só recomeçam (o cérebro é externo no serve).
                 std::cout << "[" << mode_name << "] Score final: " << physics.maximumScore
@@ -257,6 +296,17 @@ int main(int argc, char** argv)
                 continue;
             }
 
+            // Pássaros ainda vivos (ex.: fim forçado com K) têm fitness=0 porque
+            // o fitness só é calculado na morte. Finaliza aqui pelo score atual,
+            // senão o sort joga o melhor (vivo) pro fim e salvamos um cérebro ruim.
+            for (auto& a : generation.agents) {
+                if (a.bird.alive) {
+                    a.fitness = (a.bird.score == 0)
+                                ? (float)(a.bird.time * a.bird.time)
+                                : 50.0f * a.bird.score;
+                }
+            }
+
             idx = elite;
             generation.sort();
             std::cout << "maximumScore at Generation " << generation.gen
@@ -264,7 +314,11 @@ int main(int argc, char** argv)
 
             // Salva o melhor cérebro depois do sort (agents[0] = melhor)
             if (!generation.agents.empty()) {
-                if (saveBrain(generation.agents[0].brain, model_path)) {
+                const Agent& best = generation.agents[0];
+                std::cout << "[TRAIN] melhor salvo: score=" << best.bird.score
+                          << " fitness=" << best.fitness
+                          << " w0=" << best.brain.weights_hidden[0] << "\n";
+                if (saveBrain(best.brain, model_path)) {
                     std::cout << "[TRAIN] Modelo salvo em " << model_path << "\n";
                 } else {
                     std::cerr << "[TRAIN] Falha ao salvar modelo em " << model_path << "\n";
@@ -279,6 +333,23 @@ int main(int argc, char** argv)
             physics.reset(initialBirds);
         }
     }
+
+    // Ao sair (Esc/fechar janela) em modo train, salva o melhor da geração
+    // atual — assim uma geração em andamento não é perdida. Finaliza o fitness
+    // dos vivos antes do sort (mesmo motivo do fim forçado por K).
+    if (mode == Mode::Train && !generation.agents.empty()) {
+        for (auto& a : generation.agents) {
+            if (a.bird.alive) {
+                a.fitness = (a.bird.score == 0)
+                            ? (float)(a.bird.time * a.bird.time)
+                            : 50.0f * a.bird.score;
+            }
+        }
+        generation.sort();
+        if (saveBrain(generation.agents[0].brain, model_path))
+            std::cout << "[TRAIN] Melhor da geracao atual salvo em " << model_path << " ao sair.\n";
+    }
+
     if (jump_fd >= 0) close(jump_fd);
     return 0;
 }

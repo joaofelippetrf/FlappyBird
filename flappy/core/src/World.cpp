@@ -79,20 +79,27 @@ bool World :: updateScoreEval(float leftmostOfBird){
 }
 
 void World :: updateObstacle(double dt){
-    float timer =1.4;
-    
+    float timer = 2.2;   // mais tempo entre canos (era 1.4) — compensa a velocidade menor
+
     if(spawn >= timer || obstacles.empty()){
         float screenHeight = 1080.f;
-        float empty = 250.f; 
+        float empty = 400.f;     // gap maior (era 250) — mais fácil de passar
+        int   minPipe = 200;     // altura mínima de CADA cano — garante cima E baixo
+                                 // sempre visíveis e grandes o bastante pra câmera.
+
+        // Faixa do centro do gap que garante os dois canos com altura >= minPipe.
+        // Com empty=400 e minPipe=200, cada cano fica entre 200 e 480 px.
+        int lo = (int)(empty / 2.f) + minPipe;                 // topo do cano de cima >= minPipe
+        int hi = (int)(screenHeight - empty / 2.f) - minPipe;  // cano de baixo >= minPipe
 
         int rdm ;
-        if (maximumScore < 40) { 
-            std::mt19937 deterministicGen(42 + obstacleIndex); 
-            std::uniform_int_distribution<int> dist(200, 780);
+        if (maximumScore < 40) {
+            std::mt19937 deterministicGen(42 + obstacleIndex);
+            std::uniform_int_distribution<int> dist(lo, hi);
             rdm = dist(deterministicGen);
-            obstacleIndex++; 
+            obstacleIndex++;
         }
-        else rdm = (rand() % 580) + 200;
+        else rdm = (rand() % (hi - lo + 1)) + lo;
 
 
         float heightUp = rdm - (empty / 2.f); 
